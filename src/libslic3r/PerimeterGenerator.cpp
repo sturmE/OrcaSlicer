@@ -54,6 +54,43 @@ public:
 
 using PerimeterGeneratorLoops = std::vector<PerimeterGeneratorLoop>;
 
+// Helper function to generate the print order for middle-out wall sequences
+static std::vector<int> generate_middle_out_sequence(int num_walls, WallSequence sequence) {
+    std::vector<int> order;
+
+    if (num_walls <= 0) return order;
+
+    if (num_walls == 1) {
+        order.push_back(1);
+        return order;
+    }
+
+    if (num_walls == 2) {
+        if (sequence == WallSequence::MiddleOutOuterInner) {
+            order = {2, 1};  // Start at highest, then outer
+        } else { // MiddleOutInnerOuter
+            order = {1, 2};  // Outer then inner
+        }
+        return order;
+    }
+
+    // 3+ walls: Phase 1 - Middle-out (3, 4, 5, ..., N)
+    for (int i = 3; i <= num_walls; ++i) {
+        order.push_back(i);
+    }
+
+    // Phase 2 - Outer perimeters
+    if (sequence == WallSequence::MiddleOutOuterInner) {
+        order.push_back(1);  // Outer
+        order.push_back(2);  // First inner
+    } else { // MiddleOutInnerOuter
+        order.push_back(2);  // First inner
+        order.push_back(1);  // Outer
+    }
+
+    return order;
+}
+
 template<class _T>
 static bool detect_steep_overhang(const PrintRegionConfig *config,
                                   bool                     is_contour,
@@ -95,6 +132,42 @@ static bool detect_steep_overhang(const PrintRegionConfig *config,
     }
 
     return false;
+}
+
+// Reorder extrusion entities for middle-out wall sequences in Classic mode
+static void reorder_middle_out_classic(ExtrusionEntityCollection& entities, WallSequence sequence) {
+    if (entities.entities.size() < 2) return;
+
+    // Reverse to get external-to-internal order like existing InnerOuterInner
+    entities.reverse();
+
+    // Group by inset_idx (0=outer, 1=first internal, 2+=deeper internal)
+    std::map<int, std::vector<ExtrusionEntity*>> perimeter_groups;
+    int max_inset = 0;
+
+    for (auto* entity : entities.entities) {
+        int inset = entity->inset_idx;
+        perimeter_groups[inset].push_back(entity);
+        max_inset = std::max(max_inset, inset);
+    }
+
+    int num_walls = max_inset + 1;
+    auto print_order = generate_middle_out_sequence(num_walls, sequence);
+
+    // Rebuild entities in new order
+    ExtrusionEntityCollection reordered_entities;
+    for (int wall_idx : print_order) {
+        int inset = wall_idx - 1;  // Convert 1-based to 0-based
+        if (perimeter_groups.count(inset)) {
+            for (auto* entity : perimeter_groups[inset]) {
+                reordered_entities.append(*entity);
+            }
+        }
+    }
+
+    // Replace original collection
+    entities.clear();
+    entities = std::move(reordered_entities);
 }
 
 static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls,
@@ -353,6 +426,49 @@ struct PerimeterGeneratorArachneExtrusion
     // Indicates if closed ExtrusionLine is a contour or a hole. Used it only when ExtrusionLine is a closed loop.
     bool is_contour = false;
 };
+
+// Helper function to move contours to front of Arachne extrusions (matching existing InnerOuterInner)
+static void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& ordered_extrusions) {
+    std::stable_partition(ordered_extrusions.begin(), ordered_extrusions.end(),
+                         [](const PerimeterGeneratorArachneExtrusion& extrusion) {
+                             return extrusion.is_contour;
+                         });
+}
+
+// Reorder Arachne extrusions for middle-out wall sequences
+static void reorder_middle_out_arachne(std::vector<PerimeterGeneratorArachneExtrusion>& ordered_extrusions,
+                                       WallSequence sequence) {
+    if (ordered_extrusions.size() < 2) return;
+
+    // Ensure contours are at front like existing InnerOuterInner
+    bringContoursToFront(ordered_extrusions);
+
+    // Group by inset_idx and reorder using same algorithm as Classic mode
+    std::map<int, std::vector<PerimeterGeneratorArachneExtrusion>> perimeter_groups;
+    int max_inset = 0;
+
+    for (const auto& extrusion : ordered_extrusions) {
+        int inset = extrusion.extrusion->inset_idx;
+        perimeter_groups[inset].push_back(extrusion);
+        max_inset = std::max(max_inset, inset);
+    }
+
+    int num_walls = max_inset + 1;
+    auto print_order = generate_middle_out_sequence(num_walls, sequence);
+
+    // Rebuild in new order
+    std::vector<PerimeterGeneratorArachneExtrusion> reordered_extrusions;
+    for (int wall_idx : print_order) {
+        int inset = wall_idx - 1;  // Convert 1-based to 0-based
+        if (perimeter_groups.count(inset)) {
+            for (const auto& extrusion : perimeter_groups[inset]) {
+                reordered_extrusions.push_back(extrusion);
+            }
+        }
+    }
+
+    ordered_extrusions = std::move(reordered_extrusions);
+}
 
 static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& perimeter_generator, std::vector<PerimeterGeneratorArachneExtrusion>& pg_extrusions,
     bool &steep_overhang_contour, bool &steep_overhang_hole)
@@ -1431,7 +1547,9 @@ void PerimeterGenerator::process_classic()
             // if brim will be printed, reverse the order of perimeters so that
             // we continue inwards after having finished the brim
             // TODO: add test for perimeter order
-            bool is_outer_wall_first = this->config->wall_sequence == WallSequence::OuterInner;
+            bool is_outer_wall_first = this->config->wall_sequence == WallSequence::OuterInner ||
+                                       this->config->wall_sequence == WallSequence::MiddleOutOuterInner ||
+                                       this->config->wall_sequence == WallSequence::MiddleOutInnerOuter;
             if (is_outer_wall_first ||
                 //BBS: always print outer wall first when there indeed has brim.
                 (this->layer_id == 0 &&
@@ -1536,7 +1654,12 @@ void PerimeterGenerator::process_classic()
                     }
                 }
             }
-            
+            // Orca: Middle-out wall sequences. Apply after 1st layer.
+            else if ((this->config->wall_sequence == WallSequence::MiddleOutOuterInner ||
+                      this->config->wall_sequence == WallSequence::MiddleOutInnerOuter) && layer_id > 0) {
+                reorder_middle_out_classic(entities, this->config->wall_sequence);
+            }
+
             // append perimeters for this slice as a collection
             if (! entities.empty())
                 this->loops->append(entities);
@@ -2253,11 +2376,15 @@ void PerimeterGenerator::process_arachne()
 
 		bool is_outer_wall_first =
             	this->config->wall_sequence == WallSequence::OuterInner ||
-            	this->config->wall_sequence == WallSequence::InnerOuterInner;
-        
+            	this->config->wall_sequence == WallSequence::InnerOuterInner ||
+            	this->config->wall_sequence == WallSequence::MiddleOutOuterInner ||
+            	this->config->wall_sequence == WallSequence::MiddleOutInnerOuter;
+
         if (layer_id == 0){ // disable inner outer inner algorithm after the first layer
         	is_outer_wall_first =
-            	this->config->wall_sequence == WallSequence::OuterInner;
+            	this->config->wall_sequence == WallSequence::OuterInner ||
+            	this->config->wall_sequence == WallSequence::MiddleOutOuterInner ||
+            	this->config->wall_sequence == WallSequence::MiddleOutInnerOuter;
         }
         if (is_outer_wall_first) {
             start_perimeter = 0;
@@ -2441,7 +2568,12 @@ void PerimeterGenerator::process_arachne()
                 }
             }
         }
-        
+        // Orca: Middle-out wall sequences. Apply after 1st layer.
+        else if ((this->config->wall_sequence == WallSequence::MiddleOutOuterInner ||
+                  this->config->wall_sequence == WallSequence::MiddleOutInnerOuter) && layer_id > 0) {
+            reorder_middle_out_arachne(ordered_extrusions, this->config->wall_sequence);
+        }
+
         bool steep_overhang_contour = false;
         bool steep_overhang_hole    = false;
         const WallDirection wall_direction = config->wall_direction;

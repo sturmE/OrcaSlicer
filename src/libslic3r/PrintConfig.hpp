@@ -107,6 +107,8 @@ enum class WallSequence {
     InnerOuter,
     OuterInner,
     InnerOuterInner,
+    MiddleOutOuterInner,     // New: 3...N, 1, 2
+    MiddleOutInnerOuter,    // New: 3...N, 2, 1
     Count,
 };
 
