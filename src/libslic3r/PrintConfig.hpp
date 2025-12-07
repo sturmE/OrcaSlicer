@@ -112,6 +112,8 @@ enum class WallInfillOrder {
     InfillInnerOuter,
     InfillOuterInner,
     InnerOuterInnerInfill,
+    MiddleInOuterInfill,
+    MiddleInOuterInnerInfill,
     Count,
 };
 
@@ -133,6 +135,8 @@ enum class WallSequence {
     InnerOuter,
     OuterInner,
     InnerOuterInner,
+    MiddleInOuter,          // New: 2,3,1   or 3-N,2,1
+    MiddleInOuterInner,     // New: 3,4,1,2 or 4-N,3,1,2
     Count,
 };
 

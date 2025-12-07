@@ -54,6 +54,66 @@ public:
 
 using PerimeterGeneratorLoops = std::vector<PerimeterGeneratorLoop>;
 
+// Helper function to generate the print order for middle-in wall sequences
+static std::vector<int> generate_middle_in_sequence(int num_walls, WallSequence sequence) {
+    std::vector<int> order;
+
+    if (num_walls <= 0) return order;
+
+    if (num_walls == 1) {
+        order.push_back(1);
+        return order;
+    }
+
+    if (sequence == WallSequence::MiddleInOuter) {
+        if (num_walls == 2) {
+            order = {2, 1};     // Inner then outer
+        } else if (num_walls == 3) {
+            order = {2, 3, 1};  // Middle, then inner, then outer
+        } else {
+            // 4+ walls: Phase 1 - Middle-in (3, 4, 5, ..., N)
+            for (int i = 3; i <= num_walls; ++i) {
+                order.push_back(i);
+            }
+            // Phase 2 - Outer perimeters
+            order.push_back(2);  // First inner
+            order.push_back(1);  // Outer
+
+            // Considered 2 to N, then 1 ordering but decided that 3-N,2,1 can prevent
+            // a deretraction on the outer perimeter if the wall count is high or perimeter is wide
+            // (distance from innermost to outer perimeter is above travel distance threshold)
+            // and will provide maximum similarity to inner-outer
+        }
+    } else { // MiddleInOuterInner
+        if (num_walls == 2) {
+            order = {1, 2};     // Outer then inner
+        } else if (num_walls == 3) {
+            order = {3, 1, 2};  // Inner, then outer, then 1st inner (no inner overhang benefit)
+        } else if (num_walls == 4) {
+            order = {3, 4, 1, 2}; // Middle-in, then outer, then 1st inner
+            // may cause a deretraction at the start of the outer perimeter if the distance from
+            // perimeter 4 to 1 is above the travel distance threshold, while inner/outer/inner
+            // wouldn't if the threshold is higher than the distance from 3 to 1.
+        } else {
+            // 5+ walls: Phase 1 - Middle-in (4, 5, ..., N)
+            for (int i = 4; i <= num_walls; ++i) {
+                order.push_back(i);
+            }
+            // Phase 2 - Outer perimeters
+            order.push_back(3);  // Second inner
+            order.push_back(1);  // Outer
+            order.push_back(2);  // First inner
+
+            // Considered 3 to N, then 1, then 2 ordering but decided that 4-N,3,1,2 can prevent 
+            // a deretraction on the outer perimeter if the wall count is high or perimeter is wide
+            // (distance from innermost to outer perimeter is above travel distance threshold)
+            // and will provide maximum similarity to inner/outer/inner
+        }
+    }
+
+    return order;
+}
+
 template<class _T>
 static bool detect_steep_overhang(const PrintRegionConfig *config,
                                   bool                     is_contour,
@@ -95,6 +155,58 @@ static bool detect_steep_overhang(const PrintRegionConfig *config,
     }
 
     return false;
+}
+
+// Reorder extrusion entities for middle-in wall sequences in Classic mode
+static void reorder_middle_in_classic(ExtrusionEntityCollection& entities, WallSequence sequence) {
+    if (entities.entities.size() < 2) return;
+
+    // Reverse to get external-to-internal order
+    entities.reverse();
+
+    ExtrusionEntityCollection reordered_entities;
+
+    std::vector<ExtrusionEntity*> perimeter_group;
+
+    // Helper lambda to process and flush the current group into the final collection
+    auto process_current_group = [&]() {
+        if (perimeter_group.empty()) return;
+
+        int num_walls = perimeter_group.size();
+        auto print_order = generate_middle_in_sequence(num_walls, sequence);
+
+        // Rebuild entities in new order
+        for (int wall_idx : print_order) {
+            int target_inset = wall_idx - 1;  // Convert 1-based to 0-based            
+            reordered_entities.entities.push_back(perimeter_group[target_inset]);
+        }
+
+        // Reset for the next group (preserves capacity for performance)
+        perimeter_group.clear();
+    };
+
+    // Iterate over the original entities
+    for (const auto& extrusion : entities) {
+        int inset = extrusion->inset_idx;
+
+        // If inset is 0 AND the current buffer is not empty, we have hit the start of a new group.
+        if (inset == 0 && !perimeter_group.empty()) {
+            process_current_group();
+        }
+
+        // Resize the buffer if necessary, filling with nullptrs
+        if (inset >= perimeter_group.size()) {
+            perimeter_group.resize(inset + 1, nullptr);
+        }
+        
+        perimeter_group[inset] = extrusion;
+    }
+
+    // Process the final group remaining after the loop finishes
+    process_current_group();
+
+    // Overwrite original collection with the fully reconstructed sequence
+    entities = std::move(reordered_entities);
 }
 
 static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls,
@@ -1563,7 +1675,12 @@ void PerimeterGenerator::process_classic()
                     }
                 }
             }
-            
+            // Orca: Middle-in wall sequences. Apply after 1st layer.
+            else if ((this->config->wall_sequence == WallSequence::MiddleInOuterInner ||
+                      this->config->wall_sequence == WallSequence::MiddleInOuter) && layer_id > 0) {
+                reorder_middle_in_classic(entities, this->config->wall_sequence);
+            }
+
             // append perimeters for this slice as a collection
             if (! entities.empty())
                 this->loops->append(entities);
@@ -2120,6 +2237,58 @@ void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& order
 // Inner Outer Inner wall ordering mode perimeter order optimisation functions ended
 
 
+// Reorder Arachne extrusions for middle-in wall sequences
+static void reorder_middle_in_arachne(std::vector<PerimeterGeneratorArachneExtrusion>& ordered_extrusions,
+                                       WallSequence sequence) {
+    if (ordered_extrusions.size() < 2) return;
+
+    std::vector<PerimeterGeneratorArachneExtrusion> final_extrusions;
+    final_extrusions.reserve(ordered_extrusions.size());
+
+    std::vector<const PerimeterGeneratorArachneExtrusion*> perimeter_group;
+
+    // Helper lambda to process and flush the group
+    auto process_current_group = [&]() {
+        if (perimeter_group.empty()) return;
+
+        int num_walls = perimeter_group.size();
+        auto print_order = generate_middle_in_sequence(num_walls, sequence);
+
+        // Rebuild the group in the new order
+        for (int wall_idx : print_order) {
+            int target_inset = wall_idx - 1;  // Convert 1-based to 0-based
+            
+            final_extrusions.push_back(*perimeter_group[target_inset]);
+        }
+
+        // Reset for the next group (preserves capacity for performance)
+        perimeter_group.clear();
+    };
+
+    for (const auto& extrusion : ordered_extrusions) {
+        int inset = extrusion.extrusion->inset_idx;
+
+        // If inset is 0 AND the buffer is not empty, we hit a new group
+        if (inset == 0 && !perimeter_group.empty()) {
+            process_current_group();
+        }
+
+        // Resize the buffer if necessary, filling with nullptrs
+        if (inset >= perimeter_group.size()) {
+            perimeter_group.resize(inset + 1, nullptr);
+        }
+        
+        // Store a pointer to the original extrusion
+        perimeter_group[inset] = &extrusion;
+    }
+
+    // Process the final group remaining after the loop finishes
+    process_current_group();
+
+    // Overwrite original vector with the fully reconstructed sequence
+    ordered_extrusions = std::move(final_extrusions);
+}
+
 // Thanks, Cura developers, for implementing an algorithm for generating perimeters with variable width (Arachne) that is based on the paper
 // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling"
 void PerimeterGenerator::process_arachne()
@@ -2305,7 +2474,7 @@ void PerimeterGenerator::process_arachne()
 		bool is_outer_wall_first =
             	this->config->wall_sequence == WallSequence::OuterInner ||
             	this->config->wall_sequence == WallSequence::InnerOuterInner;
-        
+
         if (layer_id == 0){ // disable inner outer inner algorithm after the first layer
         	is_outer_wall_first =
             	this->config->wall_sequence == WallSequence::OuterInner;
@@ -2492,7 +2661,33 @@ void PerimeterGenerator::process_arachne()
                 }
             }
         }
-        
+        // Orca: Middle-in wall sequences. Apply after 1st layer.
+        else if ((this->config->wall_sequence == WallSequence::MiddleInOuterInner ||
+                  this->config->wall_sequence == WallSequence::MiddleInOuter) && layer_id > 0) {
+
+            // Like Inner-Outer-Inner, address any scenarios where the outer perimeter contour is not first on the list as arachne sometimes reorders the perimeters when clustering
+            bringContoursToFront(ordered_extrusions);
+            std::vector<PerimeterGeneratorArachneExtrusion> reordered_extrusions;
+            
+            // Get searching thresholds. For an external perimeter we take the external perimeter spacing/2 plus the internal perimeter spacing/2 and expand by the factor
+            // rounding errors. When precise wall is enabled, the external perimeter full spacing is used.
+            coord_t threshold_external = (apply_precise_outer_wall)
+                // Precise outer wall ⇒ use “full external spacing”
+                ? ( this->ext_perimeter_flow.scaled_spacing()
+                    + this->perimeter_flow.scaled_spacing()/2.0 )
+                // Normal ⇒ half ext spacing + half int spacing
+                : ( this->ext_perimeter_flow.scaled_spacing()/2.0
+                    + this->perimeter_flow.scaled_spacing()/2.0 );
+            
+            // For the intenal perimeter threshold, the distance is the internal perimeter spacing expanded by the factor to cover rounding errors.
+            coord_t threshold_internal = this->perimeter_flow.scaled_spacing();
+            
+            // Re-order extrusions based on distance
+            ordered_extrusions = reorderPerimetersByProximity(ordered_extrusions,threshold_external,threshold_internal );
+            
+            reorder_middle_in_arachne(ordered_extrusions, this->config->wall_sequence);
+        }
+
         bool steep_overhang_contour = false;
         bool steep_overhang_hole    = false;
         if (!config->overhang_reverse) {

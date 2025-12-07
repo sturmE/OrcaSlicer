@@ -940,6 +940,9 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                         if (it.value() == "outer wall/inner wall/infill" || it.value() == "infill/outer wall/inner wall" || it.value() == "inner-outer-inner wall/infill") {
                             get_wall_sequence = "wall_seq_diff_to_system";
                         }
+                        if (it.value() == "middle-in/outer wall/infill" || it.value() == "middle-in/outer-inner wall/infill") {
+                            get_wall_sequence = "wall_seq_diff_to_system";
+                        }
 
                         if (it.value() == "infill/outer wall/inner wall" || it.value() == "infill/inner wall/outer wall") {
                             different_settings_append.push_back("is_infill_first");

@@ -269,7 +269,9 @@ static t_config_enum_values s_keys_map_WallInfillOrder {
     { "inner-outer-inner wall/infill",     int(WallInfillOrder::InnerOuterInnerInfill) },
     { "infill/inner wall/outer wall",     int(WallInfillOrder::InfillInnerOuter) },
     { "infill/outer wall/inner wall",     int(WallInfillOrder::InfillOuterInner) },
-    { "inner-outer-inner wall/infill",     int(WallInfillOrder::InnerOuterInnerInfill)}
+    { "inner-outer-inner wall/infill",     int(WallInfillOrder::InnerOuterInnerInfill)},
+    { "middle-in/outer wall/infill",     int(WallInfillOrder::MiddleInOuterInfill)},
+    { "middle-in/outer-inner wall/infill", int(WallInfillOrder::MiddleInOuterInnerInfill)}
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallInfillOrder)
 
@@ -277,8 +279,9 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallInfillOrder)
 static t_config_enum_values s_keys_map_WallSequence {
     { "inner wall/outer wall",     int(WallSequence::InnerOuter) },
     { "outer wall/inner wall",     int(WallSequence::OuterInner) },
-    { "inner-outer-inner wall",    int(WallSequence::InnerOuterInner)}
-
+    { "inner-outer-inner wall",    int(WallSequence::InnerOuterInner) },
+    { "middle-in/outer wall",      int(WallSequence::MiddleInOuter) },       // New
+    { "middle-in/outer-inner wall", int(WallSequence::MiddleInOuterInner) }  // New
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallSequence)
 
@@ -2117,9 +2120,13 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("inner wall/outer wall");
     def->enum_values.push_back("outer wall/inner wall");
     def->enum_values.push_back("inner-outer-inner wall");
+    def->enum_values.push_back("middle-in/outer");
+    def->enum_values.push_back("middle-in/outer-inner");
     def->enum_labels.push_back(L("Inner/Outer"));
     def->enum_labels.push_back(L("Outer/Inner"));
     def->enum_labels.push_back(L("Inner/Outer/Inner"));
+    def->enum_labels.push_back(L("Middle-In/Outer"));
+    def->enum_labels.push_back(L("Middle-In/Outer-Inner"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
 
@@ -8006,7 +8013,7 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         }
     } else if (opt_key == "overhang_fan_threshold" && value == "5%") {
         value = "10%";
-    } else if( opt_key == "wall_infill_order" ) {
+    } else if ( opt_key == "wall_infill_order" ) {
         if (value == "inner wall/outer wall/infill" || value == "infill/inner wall/outer wall") {
             opt_key = "wall_sequence";
             value = "inner wall/outer wall";
@@ -8016,6 +8023,12 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         } else if (value == "inner-outer-inner wall/infill") {
             opt_key = "wall_sequence";
             value = "inner-outer-inner wall";
+        } else if (value == "middle-in/outer wall/infill") {
+            opt_key = "wall_sequence";
+            value = "middle-in/outer wall";
+        } else if (value == "middle-in/outer-inner wall/infill") {
+            opt_key = "wall_sequence";
+            value = "middle-in/outer-inner wall";
         } else {
             opt_key = "wall_sequence";
         }
